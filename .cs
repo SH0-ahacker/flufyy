@@ -12,7 +12,10 @@ using TrollRAT.Payloads;
 using TrollRAT.Server.Commands;
 using TrollRATPayloads.Actions;
 using System.ComponentModel.Composition;
-
+using System.IO;
+using System.Reflection;
+using System.Text;
+using TrollRAT.Utils;
 using TrollRAT.Payloads;
 using TrollRATPayloads.Actions;
 using Flufuyy.Maware.Payloads
@@ -516,3 +519,461 @@ public static class OverlayWindow
     }
 
 
+public abstract class Payload
+    {
+        protected string name;
+        public string Name => name;
+
+        protected List<PayloadSetting> settings = new List<PayloadSetting>();
+        public List<PayloadSetting> Settings => settings;
+
+        protected List<PayloadAction> actions = new List<PayloadAction>();
+        public List<PayloadAction> Actions => actions;
+
+        public virtual void writeToStream(BinaryWriter writer)
+        {
+            foreach (PayloadSetting setting in settings)
+            {
+                setting.writeToStream(writer);
+            }
+        }
+
+        public virtual void readFromStream(BinaryReader reader)
+        {
+            foreach (PayloadSetting setting in settings)
+            {
+                setting.readFromStream(reader);
+            }
+        }
+    }
+
+    public abstract class ExecutablePayload : Payload
+    {
+        protected abstract void execute();
+
+        public ExecutablePayload()
+        {
+            actions.Add(new PayloadActionExecute(this));
+        }
+
+        public void Execute()
+        {
+            var thread = new Thread(new ThreadStart(execute));
+            thread.Start();
+        }
+    }
+
+    public abstract class LoopingPayload : ExecutablePayload
+    {
+        public static bool pausePayloads = false;
+
+        protected bool running = false;
+        public bool Running => running;
+
+        private PayloadSettingNumber delay;
+        public decimal Delay => delay.Value;
+
+        protected int i;
+
+        public LoopingPayload(int defaultDelay)
+        {
+            delay = new PayloadSettingNumber(defaultDelay, "Delay (in 1/100 seconds)", 1, 10000, 1);
+
+            settings.Add(delay);
+            actions.Add(new PayloadActionStartStop(this));
+
+            var thread = new Thread(new ThreadStart(Loop));
+            thread.Start();
+        }
+
+        public LoopingPayload() : this(100) { }
+
+        public void Start()
+        {
+            running = true;
+            i = 0;
+        }
+
+        public void Stop()
+        {
+            running = false;
+        }
+
+        private void Loop()
+        {
+            while (true)
+            {
+                if (running && !pausePayloads)
+                {
+                    execute();
+                }
+
+                for (i = (int)Delay; i >= 0; i--)
+                    Thread.Sleep(10);
+            }
+        }
+
+        public override void writeToStream(BinaryWriter writer)
+        {
+            base.writeToStream(writer);
+            writer.Write(running);
+        }
+
+        public override void readFromStream(BinaryReader reader)
+        {
+            base.readFromStream(reader);
+            running = reader.ReadBoolean();
+        }
+    }
+    
+public abstract class PayloadAction : IDBase<PayloadAction>
+    {
+        protected Payload payload;
+        public Payload Payload => payload;
+
+        public PayloadAction(Payload payload)
+        {
+            this.payload = payload;
+        }
+
+        public abstract string getListButton();
+        public abstract string getSettingsButton();
+
+        // Returns JavaScript to be executed by the client
+        public abstract string execute();
+
+        // Returns the JavaScript that should be used for the button
+        // in order to trigger its server routine
+        public virtual string getExecuteJavascript()
+        {
+            return String.Format("execute({0});", id);
+        }
+    }
+
+    public abstract class SimplePayloadAction : PayloadAction
+    {
+        public SimplePayloadAction(Payload payload) : base(payload) { }
+
+        public abstract string Title { get; }
+        public abstract string Icon { get; }
+        public virtual string Color => "default";
+
+        public override string getListButton()
+        {
+            if (Icon == null)
+                return null;
+
+            return String.Format("<span onclick=\"{0}\" class=\"btn btn-{2} btn-xs\">" +
+                "<span class=\"glyphicon glyphicon-{1}\" aria-hidden=\"true\"></span></span> ",
+                getExecuteJavascript(), Icon, Color);
+        }
+
+        public override string getSettingsButton()
+        {
+            return String.Format("<button type=\"button\" onclick=\"{0}\" class=\"btn btn-{2} btn-xl\">" +
+               "{1}</button> ", getExecuteJavascript(), Title, Color);
+        }
+    }
+
+    public abstract class DangerousPayloadAction : SimplePayloadAction
+    {
+        public DangerousPayloadAction(Payload payload) : base(payload) { }
+
+        // TODO Proper Escaping
+        public abstract string WarningMessage { get; }
+
+        public override string Color => "danger";
+
+        public override string getExecuteJavascript()
+        {
+            return String.Format("showYesNo('{0}', '{2}', '{1}');", WarningMessage, base.getExecuteJavascript(), Title);
+        }
+    }
+
+    public class PayloadActionExecute : SimplePayloadAction
+    {
+        public override string Title => "Execute";
+        public override string Icon => "cog";
+
+        public PayloadActionExecute(Payload payload) : base(payload) { }
+
+        public override string execute()
+        {
+            if (payload is ExecutablePayload)
+            {
+                ExecutablePayload pl = ((ExecutablePayload)payload);
+                pl.Execute();
+            }
+            else
+            {
+                throw new ArgumentException("Payload is not an ExecutablePayload");
+            }
+
+            return "void(0);";
+        }
+    }
+
+    public class PayloadActionStartStop : SimplePayloadAction
+    {
+        LoopingPayload pl;
+        public PayloadActionStartStop(Payload payload) : base(payload)
+        {
+            if (payload is LoopingPayload)
+                pl = ((LoopingPayload)payload);
+            else
+                throw new ArgumentException("Payload is not a LoopingPayload");
+        }
+
+        public override string execute()
+        {
+            if (pl.Running)
+                pl.Stop();
+            else
+                pl.Start();
+
+            return "update();";
+        }
+        
+        public override string Icon => pl.Running ? "stop" : "play";
+        public override string Title => pl.Running ? "Stop" : "Start";
+    }
+    
+{
+    public abstract class PayloadSetting : IDBase<PayloadSetting>
+    {
+        public abstract void writeHTML(StringBuilder builder);
+        public abstract void readData(string str);
+
+        public virtual void writeToStream(BinaryWriter writer)
+        {
+            //writer.Write(id);
+        }
+
+        public virtual void readFromStream(BinaryReader reader)
+        {
+            //id = reader.ReadInt32();
+        }
+    }
+
+    public abstract class PayloadSetting<t> : PayloadSetting
+    {
+        public delegate void PayloadSettingChangeEvent(object sender, t newValue);
+        public event PayloadSettingChangeEvent SettingChanged;
+
+        protected t value;
+        public t Value
+        {
+            get { return value; }
+            set
+            {
+                if (isValid(value))
+                {
+                    this.value = value;
+                    SettingChanged(this, value);
+                }
+            }
+        }
+
+        public PayloadSetting(t defaultValue) : base()
+        {
+            value = defaultValue;
+        }
+
+        public virtual bool isValid(t v)
+        {
+            return true;
+        }
+
+        public virtual void writeValueToStream(BinaryWriter writer)
+        {
+            foreach (MethodInfo method in writer.GetType().GetMethods())
+            {
+                if (method.Name == "Write" && method.GetParameters()[0].ParameterType == typeof(t))
+                {
+                    method.Invoke(writer, new object[] { value });
+                    return;
+                }
+            }
+
+            throw new NotImplementedException("The value type is not suported by BinaryWriter. Please override the writeValueToStream method.");
+        }
+
+        public virtual void readValueFromStream(BinaryReader reader)
+        {
+            foreach (MethodInfo method in reader.GetType().GetMethods())
+            {
+                if (method.Name.StartsWith("Read") && method.Name != "Read" && method.ReturnType == typeof(t))
+                {
+                    Value = (t)method.Invoke(reader, new object[0]);
+                    return;
+                }
+            }
+
+            throw new NotImplementedException("The value type is not suported by BinaryReader. Please override the readValueFromStream method.");
+        }
+
+        public override void writeToStream(BinaryWriter writer)
+        {
+            base.writeToStream(writer);
+            writeValueToStream(writer);
+        }
+
+        public override void readFromStream(BinaryReader reader)
+        {
+            base.readFromStream(reader);
+            readValueFromStream(reader);
+        }
+    }
+
+    public abstract class TitledPayloadSetting<t> : PayloadSetting<t>
+    {
+        protected string title;
+        public string Title => title;
+
+        public TitledPayloadSetting(t defaultValue, string title) : base(defaultValue)
+        {
+            this.title = title;
+        }
+    }
+
+    public class PayloadSettingNumber : TitledPayloadSetting<decimal>
+    {
+        protected decimal min, max, step;
+        public decimal Min => min;
+        public decimal Max => max;
+        public decimal Step => step;
+
+        public PayloadSettingNumber(decimal defaultValue, string title, decimal min, decimal max, decimal step) : base(defaultValue, title)
+        {
+            this.min = min;
+            this.max = max;
+            this.step = step;
+        }
+
+        public override void writeHTML(StringBuilder builder)
+        {
+            builder.Append(String.Format("<div class=\"form-group\"><label for=\"id{5}\">{0}</label><input id=\"id{5}\" " +
+                "class=\"form-control\" type=\"number\"min=\"{1}\" max=\"{2}\" step=\"{3}\" value=\"{4}\" " +
+                "oninput=\"setSetting({5}, this.value);\"></input></div>",
+                title, min, max, step, value, id));
+        }
+
+        public override void readData(string str)
+        {
+            try
+            {
+                decimal i = decimal.Parse(str);
+                Value = i;
+            }
+            catch (Exception) { }
+        }
+
+        public override bool isValid(decimal v)
+        {
+            return (v <= max && v >= min);
+        }
+    }
+
+    public class PayloadSettingString : TitledPayloadSetting<string>
+    {
+        public PayloadSettingString(string defaultValue, string title) : base(defaultValue, title) { }
+
+        public override void writeHTML(StringBuilder builder)
+        {
+            builder.Append(String.Format("<div class=\"form-group\"><label for=\"id{1}\">{0}</label><input id=\"id{1}\" " +
+                "class=\"form-control\" type=\"text\" value=\"{2}\" " +
+                "oninput=\"setSetting({1}, this.value);\"></input></div>",
+                title, id, value));
+        }
+
+        public override void readData(string str)
+        {
+            value = str;
+        }
+    }
+
+    public abstract class PayloadSettingSelectBase : TitledPayloadSetting<int>
+    {
+        public abstract string[] Options { get; set; }
+        public string ValueText => Options[value];
+
+        public PayloadSettingSelectBase(int defaultValue, string title) : base(defaultValue, title) { }
+
+        public override void writeHTML(StringBuilder builder)
+        {
+            builder.Append(String.Format("<div class=\"form-group\"><label for=\"id{1}\">{0}</label><select id=\"id{1}\" " +
+                "class=\"form-control\" onchange=\"setSetting({1}, this.selectedIndex);\">",
+                title, id, value));
+
+            string[] options = Options;
+            for (int i = 0; i < options.Length; i++)
+            {
+                builder.Append((i == value ? "<option selected=\"selected\">" : "<option>") + options[i] + "</option>");
+            }
+
+            builder.Append("</select></div>");
+        }
+
+        public override void readData(string str)
+        {
+            try
+            {
+                int i = int.Parse(str);
+                Value = i;
+            }
+            catch (Exception) { }
+        }
+
+        public override bool isValid(int v)
+        {
+            return (v >= 0 && v < Options.Length);
+        }
+    }
+
+    public class PayloadSettingSelect : PayloadSettingSelectBase
+    {
+        protected string[] options;
+
+        public override string[] Options
+        {
+            get { return options; }
+            set { options = value; }
+        }
+
+        public PayloadSettingSelect(int defaultValue, string title, string[] options) : base(defaultValue, title)
+        {
+            this.options = options;
+        }
+    }
+
+    public class PayloadSettingSelectFile : PayloadSettingSelectBase
+    {
+        protected string pattern, baseDirectory;
+
+        public PayloadSettingSelectFile(int defaultValue, string title, string baseDirectory, string pattern = null) : base(defaultValue, title)
+        {
+            this.pattern = pattern;
+            this.baseDirectory = baseDirectory;
+        }
+
+        public override string[] Options
+        {
+            get
+            {
+                try
+                {
+                    if (pattern == null)
+                        return Directory.GetFiles(baseDirectory);
+                    else
+                        return Directory.GetFiles(baseDirectory, pattern);
+                } catch (Exception) {
+                    return new string[0];
+                }
+            }
+            set { throw new NotSupportedException(); }
+        }
+
+        public string selectedFilePath => Path.Combine(baseDirectory, ValueText);
+    }
+    
+    
